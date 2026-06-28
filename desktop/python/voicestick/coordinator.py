@@ -7,6 +7,7 @@ from .protocol import StateEvent, AudioFrame, ui_state_payload
 from .ble import BleClient
 from .asr_client import AsrClient
 from .input_injector import paste_text
+from .llm_translation_client import LLMTranslationClient
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,7 @@ class Coordinator:
         self._asr = asr_client
         self._session_id: Optional[int] = None
         self._recording = False
-        self._ogg_buffer: list[bytes] = []
-        self._processing_audio = False  # 防止重复处理
+        self._audio_queue: asyncio.Queue = None  # 流式音频队列
 
         # UI 回调
         self.on_status: Optional[callable] = None
@@ -28,6 +28,13 @@ class Coordinator:
         self.on_final_text: Optional[callable] = None
         self.on_device_connected: Optional[callable] = None
         self.on_device_disconnected: Optional[callable] = None
+
+        # LLM 翻译 + 润色
+        self._translator = LLMTranslationClient()
+        self._translation_enabled = False
+        self._polish_enabled = False
+        self._polish_prompt = ""
+        self._polish_before_translate = True
 
         # 配置
         self.paste_on_final = True
@@ -57,8 +64,21 @@ class Coordinator:
         if not ok:
             self._set_status("ASR 未连接")
 
+    def configure_translation(self, enabled: bool, api_key: str, base_url: str,
+                               model: str, target_language: str):
+        """配置 LLM 翻译"""
+        self._translation_enabled = enabled
+        self._translator.update_config(api_key, base_url, model, target_language)
+
+    def configure_polish(self, enabled: bool, prompt: str, before_translate: bool):
+        """配置 LLM 润色"""
+        self._polish_enabled = enabled
+        self._polish_prompt = prompt
+        self._polish_before_translate = before_translate
+
     async def shutdown(self):
         await self._asr.stop()
+        await self._translator.close()
         await self._ble.disconnect()
 
     def _set_status(self, status: str):
@@ -87,42 +107,32 @@ class Coordinator:
             self._handle_button_up(event)
 
     def _handle_button_down(self, event: StateEvent):
-        if event.button == "primary":
-            if not self._recording:
-                self._recording = True
-                self._session_id = event.session_id
-                self._ogg_buffer = []
-                self._set_status("录音中…")
-                asyncio.create_task(self._start_asr_session())
-            else:
-                self._recording = False
-                self._set_status("识别中…")
+        """按下：开始录音 + 启动 ASR 流式会话"""
+        if event.button == "primary" and not self._recording:
+            self._recording = True
+            self._session_id = event.session_id
+            self._set_status("录音中…")
+            asyncio.create_task(self._stream_start())
 
-    async def _start_asr_session(self):
-        """开始 ASR 会话"""
+    async def _stream_start(self):
+        """启动 ASR 会话（流式模式下在录音开始时即创建）"""
+        self._audio_queue = asyncio.Queue()
         ok = await self._asr.start_session()
         if not ok:
             self._set_status("ASR 会话失败")
+            self._recording = False
+            self._audio_queue = None
+            return
+        # 启动队列消费者（顺序发送，不会乱序）
+        asyncio.create_task(self._stream_send_loop())
 
     def _handle_button_up(self, event: StateEvent):
-        # Use button_up as fallback if END frame didn't trigger processing
+        # button_up 仅用于更新 session_id
         if event.session_id is not None:
             self._session_id = event.session_id
-        if self._ogg_buffer and not self._processing_audio:
-            logger.info("button_up: 处理 %d 帧缓冲音频 (END帧可能丢失)", len(self._ogg_buffer))
-            self._trigger_process_audio()
-
-    def _trigger_process_audio(self):
-        """触发 ASR 处理（防止重复调用）"""
-        if self._processing_audio:
-            return
-        if not self._ogg_buffer:
-            return
-        self._processing_audio = True
-        asyncio.create_task(self._process_audio())
 
     def _on_audio_frame(self, frame: AudioFrame):
-        # Accept frame if session matches, or if no session set yet (use first frame's session)
+        # Accept frame if session matches, or if no session set yet
         if self._session_id is not None and frame.session_id != self._session_id:
             return
         if self._session_id is None:
@@ -130,30 +140,36 @@ class Coordinator:
             logger.info("从音频帧设置 session_id=%d", self._session_id)
 
         if frame.is_end():
-            # END 帧只是触发信号，不加入音频缓冲
-            logger.info("收到结束帧，启动 ASR 处理: %d 帧缓冲", len(self._ogg_buffer))
-            self._trigger_process_audio()
+            self._recording = False
+            logger.info("收到结束帧，发送 is_last 并等待 ASR 最终结果")
+            # 发送最后一帧（is_last=True）触发服务端结束识别
+            asyncio.create_task(self._stream_finish())
         else:
-            self._ogg_buffer.append(frame.payload)
+            # 入队等待顺序发送（不直接 create_task，避免乱序）
+            if self._audio_queue is not None:
+                self._audio_queue.put_nowait(frame.payload)
 
-    async def _process_audio(self):
-        """将缓冲的 Opus 数据发送到 ASR"""
-        buffer = self._ogg_buffer
-        self._ogg_buffer = []
-        if not buffer:
-            logger.warning("_process_audio: 无音频数据")
-            self._processing_audio = False
+    async def _stream_send_loop(self):
+        """队列消费者：按序逐帧发送音频到 ASR，直到收到 None 哨兵"""
+        q = self._audio_queue
+        if q is None:
             return
-        logger.info("_process_audio: 发送 %d 帧到 ASR", len(buffer))
-        self._set_status("识别中…")
+        while True:
+            chunk = await q.get()
+            if chunk is None:
+                break  # 哨兵：队列结束
+            await self._asr.send_audio(chunk, is_last=False)
 
-        total = len(buffer)
-        for i, chunk in enumerate(buffer):
-            await self._asr.send_audio(chunk, is_last=(i == total - 1))
-            await asyncio.sleep(0.01)
-
+    async def _stream_finish(self):
+        """发送结束帧 + 等待 ASR 最终结果"""
+        # 发哨兵等队列消费者结束
+        if self._audio_queue is not None:
+            self._audio_queue.put_nowait(None)
+            self._audio_queue = None
+        await self._asr.send_audio(b"", is_last=True)
         await self._asr.stop_session()
-        self._processing_audio = False
+
+    # _process_audio 已移除 — 改用流式发送 (_stream_start / _stream_finish)
 
     # ---- ASR 回调 ----
 
@@ -163,22 +179,39 @@ class Coordinator:
 
     async def _on_asr_final(self, text: str):
         """最终 ASR 结果（协程）"""
+        # 跳过无实际文本的结果（录音过短或噪音）
+        if text.startswith("{") and '"text"' not in text:
+            logger.debug("ASR 返回空文本(录音过短), 跳过")
+            return
+
         logger.info("ASR 最终结果: %s", text)
         self._set_status("就绪")
 
         if self.on_final_text:
             self.on_final_text(text)
 
+        if not text.strip():
+            return
+
+        # 直接粘贴原文（润色/翻译/保存仅在点击按钮时执行）
+        content = text
+
+        # 通知固件：有结果了（pending confirmation）
+        await self._ble.send_ui_state("pending_confirmation")
+
         # 自动粘贴
-        if self.paste_on_final and text.strip():
+        if self.paste_on_final:
             self._set_status("粘贴中…")
-            ok = await asyncio.to_thread(paste_text, text, self.press_enter_after_paste)
+            ok = await asyncio.to_thread(paste_text, content, self.press_enter_after_paste)
             if ok:
                 self._set_status("已粘贴")
             else:
                 self._set_status("粘贴失败")
             await asyncio.sleep(1)
             self._set_status("就绪")
+
+        # 通知固件：返回就绪（蓝色）
+        await self._ble.send_ui_state("ready")
 
     def _on_asr_error(self, message: str):
         logger.error("ASR 错误: %s", message)

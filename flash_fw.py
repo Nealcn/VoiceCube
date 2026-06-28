@@ -9,6 +9,7 @@ IDF_PATH = r'D:\esp-idf'
 IDF_TOOLS_PATH = r'D:\espressif'
 env['IDF_PATH'] = IDF_PATH
 env['IDF_TOOLS_PATH'] = IDF_TOOLS_PATH
+env['ESP_ROM_ELF_DIR'] = r'C:\Users\Administrator\.espressif\tools\esp-rom-elfs\20241011'
 
 python_env_dir = r'C:\Users\Administrator\.espressif\python_env\idf5.5_py3.10_env\Scripts'
 env['IDF_PYTHON_ENV_PATH'] = os.path.dirname(python_env_dir)
@@ -27,7 +28,7 @@ existing = [p for p in tools_bin if os.path.isdir(p)]
 env['PATH'] = ';'.join(existing) + ';' + env.get('PATH', '')
 
 idf_py = os.path.join(IDF_PATH, 'tools', 'idf.py')
-fw_dir = r'D:\WAN\yuyinzhushou\firmware'
+fw_dir = r'D:\yuyin-fixed\firmware'
 
 def run_cmd(cmd, desc="", timeout=120):
     print(f"[{desc}]...", end="", flush=True)

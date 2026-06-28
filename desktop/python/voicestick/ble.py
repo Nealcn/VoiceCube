@@ -20,6 +20,7 @@ class BleClient:
         self._client: Optional[BleakClient] = None
         self._device_id = ""
         self._device_name = ""
+        self._last_address = ""
         self._audio_char = None
         self._state_char = None
         self._control_char = None
@@ -70,6 +71,7 @@ class BleClient:
         if self.is_connected:
             logger.info("BLE 已连接，跳过重复连接: %s", self._device_name)
             return
+        self._last_address = address
         self._device_name = name
         device_id = name[3:] if name.startswith("VS-") else address.replace(":", "")
         self._device_id = device_id
@@ -177,8 +179,8 @@ class BleClient:
         if not frame:
             logger.warning("音频帧解析失败: %d 字节, 头=%s", len(data), data[:8].hex())
             return
-        logger.info("音频帧: session=%d seq=%d flags=0x%x payload=%d字节",
-                     frame.session_id, frame.seq, frame.flags, len(frame.payload))
+        logger.debug("音频帧: session=%d seq=%d flags=0x%x payload=%d字节",
+                      frame.session_id, frame.seq, frame.flags, len(frame.payload))
         if self.on_audio_frame:
             self.on_audio_frame(frame)
 

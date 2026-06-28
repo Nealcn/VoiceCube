@@ -44,13 +44,15 @@ typedef struct __attribute__((packed)) {
 
 #define STATE_FRAME_TYPE 0x10
 
-// ---- Control callback (from Windows app) ----
+// ---- Callbacks ----
 typedef void (*ble_control_cb_t)(const char *json);
+typedef void (*ble_connect_cb_t)(bool connected);
 
 // ---- Public API ----
 
 esp_err_t ble_service_init(const char *device_name_prefix);
 void ble_service_set_control_callback(ble_control_cb_t cb);
+void ble_service_set_connect_callback(ble_connect_cb_t cb);
 
 esp_err_t ble_service_send_audio(const uint8_t *data, uint16_t len,
                                  uint32_t session_id, uint32_t seq, uint8_t flags);

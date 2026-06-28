@@ -19,6 +19,24 @@ class AppConfig:
     brightness: int = 50
     debug_audio: bool = False
     debug_audio_dir: str = ""
+    # LLM 翻译
+    enable_translation: bool = False
+    translation_target: str = "English"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "gpt-4o-mini"
+    # LLM 润色
+    enable_polish: bool = False
+    polish_prompt: str = (
+        "你是一个中文润色助手。"
+        "将用户输入的口语化文本整理为书面表达，修正语病、冗余和不自然之处，"
+        "使表达更清晰流畅。保留原意和风格。"
+        "只返回润色后的文本，不要解释。"
+    )
+    polish_position: str = "before_translate"  # before_translate | after_translate
+    # 悬浮球位置
+    floatball_x: int = -1
+    floatball_y: int = -1
 
     CONFIG_PATH = Path.home() / ".voicestick" / "config.json"
 

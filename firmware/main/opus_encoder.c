@@ -59,7 +59,7 @@ esp_err_t audio_encoder_init(uint32_t sample_rate, uint8_t channels, uint32_t fr
     ESP_LOGI(TAG, "Configuring encoder...");
     opus_encoder_ctl(s_encoder, OPUS_SET_BITRATE(OPUS_BITRATE));
     ESP_LOGI(TAG, "Set bitrate done");
-    opus_encoder_ctl(s_encoder, OPUS_SET_COMPLEXITY(0));
+    opus_encoder_ctl(s_encoder, OPUS_SET_COMPLEXITY(3));
     ESP_LOGI(TAG, "Set complexity done");
     opus_encoder_ctl(s_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(s_encoder, OPUS_SET_VBR(1));

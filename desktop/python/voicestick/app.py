@@ -15,8 +15,7 @@ from .config import AppConfig
 from .ble import BleClient
 from .asr_client import AsrClient
 from .coordinator import Coordinator
-from .ui.overlay import OverlayWindow
-from .ui.subtitle import SubtitleWindow
+from .ui.floatball import FloatingBallWindow
 from .ui.settings import SettingsDialog
 from .ui.pairing import PairingDialog
 
@@ -36,8 +35,13 @@ class VoiceStickApp:
         # UI
         self._tray: Optional[QSystemTrayIcon] = None
         self._tray_menu: Optional[QMenu] = None
-        self._overlay = OverlayWindow()
-        self._subtitle = SubtitleWindow()
+        self._floatball = FloatingBallWindow()
+        self._floatball.position_changed.connect(self._save_floatball_pos)
+        # LLM callbacks for 整理/翻译 buttons
+        self._floatball.set_llm_callbacks(
+            polish_cb=self._polish_text,
+            translate_cb=self._translate_text,
+        )
 
         # 状态
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -46,8 +50,21 @@ class VoiceStickApp:
         # 配置协调器
         self._coordinator.paste_on_final = self._config.paste_on_final
         self._coordinator.press_enter_after_paste = self._config.press_enter_after_paste
+        self._coordinator.configure_translation(
+            enabled=self._config.enable_translation,
+            api_key=self._config.llm_api_key,
+            base_url=self._config.llm_base_url,
+            model=self._config.llm_model,
+            target_language=self._config.translation_target,
+        )
+        self._coordinator.configure_polish(
+            enabled=self._config.enable_polish,
+            prompt=self._config.polish_prompt,
+            before_translate=(self._config.polish_position == "before_translate"),
+        )
         self._coordinator.on_status = self._on_status
         self._coordinator.on_partial_text = self._on_partial_text
+        self._coordinator.on_final_text = self._on_final_text
 
         # BLE 回调
         self._ble.on_connected = self._on_ble_connected
@@ -60,7 +77,8 @@ class VoiceStickApp:
         asyncio.set_event_loop(self._loop)
 
         self._setup_tray()
-        self._overlay.show()
+        self._floatball.load_pos(self._config.floatball_x, self._config.floatball_y)
+        self._floatball.show()
         self._coordinator.on_status("启动中…")
 
         # asyncio 事件循环运行在后台线程
@@ -171,6 +189,18 @@ class VoiceStickApp:
         if dialog.exec() and dialog.changed:
             self._coordinator.paste_on_final = self._config.paste_on_final
             self._coordinator.press_enter_after_paste = self._config.press_enter_after_paste
+            self._coordinator.configure_translation(
+                enabled=self._config.enable_translation,
+                api_key=self._config.llm_api_key,
+                base_url=self._config.llm_base_url,
+                model=self._config.llm_model,
+                target_language=self._config.translation_target,
+            )
+            self._coordinator.configure_polish(
+                enabled=self._config.enable_polish,
+                prompt=self._config.polish_prompt,
+                before_translate=(self._config.polish_position == "before_translate"),
+            )
 
             async def reconnect():
                 await self._ble.disconnect()
@@ -198,18 +228,65 @@ class VoiceStickApp:
     def _on_status(self, status: str):
         self._status_action.setText(f"状态: {status}")
         self._tray.setToolTip(f"VoiceStick — {status}")
-        self._overlay.set_status(status)
+        self._floatball.set_status(status)
 
     def _on_partial_text(self, text: str):
-        if self._config.subtitle_enabled:
-            self._subtitle.set_partial(text)
+        self._floatball.set_partial_text(text)
+
+    def _on_final_text(self, text: str):
+        self._floatball.set_final_text(text)
+
+    def _polish_text(self, text: str):
+        """同步包装：调用 LLM 润色（通过后台事件循环）"""
+        import asyncio
+        from .llm_translation_client import LLMTranslationResult
+        if not self._coordinator._translator.is_configured:
+            return LLMTranslationResult("", error="LLM 未配置（设置中填写 API Key）")
+        prompt = self._config.polish_prompt
+        fut = asyncio.run_coroutine_threadsafe(
+            self._coordinator._translator.polish(text, prompt), self._loop)
+        return fut.result(timeout=15)
+
+    def _translate_text(self, text: str):
+        """同步包装：调用 LLM 翻译（通过后台事件循环）"""
+        import asyncio
+        from .llm_translation_client import LLMTranslationResult
+        if not self._coordinator._translator.is_configured:
+            return LLMTranslationResult("", error="LLM 未配置（设置中填写 API Key）")
+        fut = asyncio.run_coroutine_threadsafe(
+            self._coordinator._translator.translate(text), self._loop)
+        return fut.result(timeout=15)
+
+    def _save_floatball_pos(self):
+        x, y = self._floatball.save_pos()
+        self._config.floatball_x = x
+        self._config.floatball_y = y
+        self._config.save()
 
     def _on_ble_connected(self, device_name: str):
         self._status_action.setText(f"已连接: {device_name}")
         self._tray.setToolTip(f"VoiceStick — {device_name}")
+        self._floatball.set_connected(True)
+        # 重连后通知固件回到就绪状态
+        asyncio.run_coroutine_threadsafe(
+            self._coordinator._ble.send_ui_state("ready"), self._loop
+        )
 
     def _on_ble_disconnected(self):
-        self._status_action.setText("状态: 已断开")
+        self._status_action.setText("状态: 已断开（重连中…）")
+        self._floatball.set_connected(False)
+        # 自动重连
+        asyncio.run_coroutine_threadsafe(self._auto_reconnect(), self._loop)
+
+    async def _auto_reconnect(self):
+        """断连后自动重连"""
+        await asyncio.sleep(0.5)
+        if self._ble.is_connected:
+            return
+        if self._config.paired_device_ids:
+            await self._scan_and_connect()
+        elif self._ble._last_address:
+            await self._ble.connect(self._ble._last_address, self._ble._device_name)
 
     async def _scan_and_connect(self):
         """扫描并连接第一个已配对设备（跳过已连接状态）"""

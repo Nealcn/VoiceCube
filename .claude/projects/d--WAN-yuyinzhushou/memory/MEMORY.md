@@ -1,1 +1,0 @@
-- [按键 GPIO 引脚](button-gpio-pin.md) — M5AtomS3R AI Chatbot 按键实际使用 GPIO39 而非官方标注的 GPIO41

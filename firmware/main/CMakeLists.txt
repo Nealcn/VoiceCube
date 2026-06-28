@@ -1,23 +1,19 @@
 idf_component_register(
     SRCS
         "main.c"
-        "pdm_mic.c"
+        "es8311_mic.c"
         "opus_encoder.c"
         "ble_service.c"
         "display.c"
         "button.c"
-        "es8311_codec.c"
+        "es8311_audio.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         driver
         esp_timer
         nvs_flash
-        efuse
         bt
         opus
-        esp_lcd
-        esp_mm
-        esp_driver_spi
-        esp_driver_i2c
+        esp_codec_dev
 )

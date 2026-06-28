@@ -36,6 +36,7 @@ static uint16_t s_audio_attr_handle = 0;
 static uint16_t s_state_attr_handle = 0;
 static char s_device_name[20] = {0};
 static ble_control_cb_t s_control_cb = NULL;
+static ble_connect_cb_t s_connect_cb = NULL;
 
 // ---- Forward declarations ----
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
@@ -117,6 +118,9 @@ static void start_advertising(void)
 {
     int rc;
 
+    // Stop any existing advertising first (prevents BLE_HS_EBUSY on reconnect)
+    ble_gap_adv_stop();
+
     // Set advertising fields (include device name + service UUID)
     struct ble_hs_adv_fields adv_fields;
     memset(&adv_fields, 0, sizeof(adv_fields));
@@ -165,18 +169,39 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_connected = true;
             ESP_LOGI(TAG, "connected, handle=%d", s_conn_handle);
+            if (s_connect_cb) s_connect_cb(true);
+
+            // Request connection parameters with 20s supervision timeout
+            // (default is ~2s, too short for audio streaming under load).
+            // Units: interval=1.25ms, supervision_timeout=10ms
+            struct ble_gap_upd_params params = {
+                .itvl_min = 12,
+                .itvl_max = 24,
+                .latency = 0,
+                .supervision_timeout = 2000,  // 2000 * 10ms = 20s
+                .min_ce_len = 0,
+                .max_ce_len = 0,
+            };
+            ble_gap_update_params(s_conn_handle, &params);
         } else {
             // Connection failed; restart advertising
             start_advertising();
         }
         break;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "disconnected, reason=%d", event->disconnect.reason);
+    case BLE_GAP_EVENT_DISCONNECT: {
+        int r = event->disconnect.reason;
+        const char *reason_str = "";
+        if (r == BLE_HS_ETIMEOUT) reason_str = "supervision_timeout";
+        else if (r == 0x16) reason_str = "local_host_term";
+        else if (r == BLE_HS_EREJECT) reason_str = "remote_reject";
+        ESP_LOGI(TAG, "disconnected, reason=%d %s", r, reason_str);
         s_connected = false;
         s_conn_handle = 0xffff;
+        if (s_connect_cb) s_connect_cb(false);
         start_advertising();
         break;
+    }
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "advertising complete, restarting...");
@@ -283,6 +308,11 @@ void ble_service_set_control_callback(ble_control_cb_t cb)
     s_control_cb = cb;
 }
 
+void ble_service_set_connect_callback(ble_connect_cb_t cb)
+{
+    s_connect_cb = cb;
+}
+
 esp_err_t ble_service_send_audio(const uint8_t *data, uint16_t len,
                                  uint32_t session_id, uint32_t seq, uint8_t flags)
 {
@@ -290,7 +320,7 @@ esp_err_t ble_service_send_audio(const uint8_t *data, uint16_t len,
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "send audio: session=%u seq=%u flags=0x%x len=%u",
+    ESP_LOGD(TAG, "send audio: session=%u seq=%u flags=0x%x len=%u",
              session_id, seq, flags, len);
 
     // Build audio frame

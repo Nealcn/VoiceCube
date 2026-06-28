@@ -7,7 +7,7 @@ env.pop('MSYSTEM', None)
 
 python = r'C:\Users\Administrator\.espressif\python_env\idf5.5_py3.10_env\Scripts\python.exe'
 idf_py = r'D:\esp-idf\tools\idf.py'
-firmware = r'D:\WAN\yuyinzhushou\firmware'
+firmware = r'D:\yuyin-fixed\firmware'
 
 print("Connecting to COM3 (Ctrl+C to stop)...")
 proc = subprocess.Popen(

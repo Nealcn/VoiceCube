@@ -67,18 +67,33 @@ def _get_clipboard_text() -> str:
 
 
 def _send_key(vk: int, down: bool):
-    """发送按键事件"""
+    """发送按键事件 — 使用 ctypes 结构体（修复 memmove 类型错误）"""
     flags = 0 if down else KEYEVENTF_KEYUP
-    ki_data = struct.pack("<HHHHI", vk, 0, 0, flags, 0)
-    input_data = struct.pack("<I", INPUT_KEYBOARD) + ki_data
-    input_data = input_data.ljust(40, b"\x00")
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.wintypes.WORD),
+            ("wScan", ctypes.wintypes.WORD),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("time", ctypes.wintypes.DWORD),
+            ("dwExtraInfo", ctypes.wintypes.ULONG),
+        ]
 
     class INPUT(ctypes.Structure):
-        _fields_ = [("data", ctypes.c_byte * 40)]
+        _fields_ = [
+            ("type", ctypes.wintypes.DWORD),
+            ("ki", KEYBDINPUT),
+        ]
 
     inp = INPUT()
-    ctypes.memmove(inp, input_data, 40)
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    inp.type = INPUT_KEYBOARD
+    inp.ki.wVk = vk
+    inp.ki.wScan = 0
+    inp.ki.dwFlags = flags
+    inp.ki.time = 0
+    inp.ki.dwExtraInfo = 0
+
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
 def _send_ctrl_v():

@@ -24,12 +24,13 @@
 #include "esp_check.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "board_config.h"
-#include "pdm_mic.h"
+#include "es8311_mic.h"
 #include "opus_encoder.h"
 #include "ble_service.h"
 #include "display.h"
@@ -58,6 +59,11 @@ static size_t s_pcm_capacity = 0;
 
 // Recording wall-clock start (for toggle-mode duration check)
 static int64_t s_rec_start_us = 0;
+/* ES8311 init result — stored for on-demand display */
+static esp_err_t s_mic_init_result = ESP_FAIL;
+
+/* PM lock to prevent CPU freq change / light sleep during recording */
+static esp_pm_lock_handle_t s_pm_lock = NULL;
 
 // Timeout timer for WAITING_ASR state (prevents permanent hang)
 static esp_timer_handle_t s_asr_timeout_timer = NULL;
@@ -67,6 +73,8 @@ static esp_timer_handle_t s_asr_timeout_timer = NULL;
 static void set_state(app_state_t new_state);
 static void stop_asr_timeout(void);
 static void start_asr_timeout(void);
+static void stop_recording(void);
+static void start_recording(void);
 
 static void asr_timeout_cb(void *arg)
 {
@@ -114,15 +122,15 @@ static void set_state(app_state_t new_state)
     }
 }
 
-// ---- PCM accumulation (callback from PDM mic) ----
+// ---- PCM accumulation (callback from ES8311 mic) ----
 static void on_pcm_data(const int16_t *data, size_t samples, uint32_t session_id)
 {
-    if (s_state != APP_STATE_RECORDING) {
+    if (s_state != APP_STATE_RECORDING || !s_pcm_buffer || !ble_service_is_connected()) {
         return;
     }
 
     if (s_pcm_count == 0) {
-        ESP_LOGI(TAG, "!!! PCM data arriving: %u samples, session=%u", (unsigned)samples, session_id);
+        ESP_LOGD(TAG, "PCM data arriving: %u samples, session=%u", (unsigned)samples, session_id);
     }
 
     // Accumulate PCM samples
@@ -137,7 +145,14 @@ static void on_pcm_data(const int16_t *data, size_t samples, uint32_t session_id
 
     // When we have a full Opus frame, encode and send
     size_t frame_samples = audio_encoder_frame_samples();
+    int frames_sent = 0;
     while (s_pcm_count >= frame_samples) {
+        // Yield every 5 frames to prevent TWDT / give NimBLE time to process
+        if (++frames_sent > 5) {
+            frames_sent = 0;
+            vTaskDelay(1);
+        }
+
         // Encode to Opus
         static uint8_t opus_data[400]; // Max Opus frame size (BSS, not stack)
         size_t opus_len = 0;
@@ -146,7 +161,6 @@ static void on_pcm_data(const int16_t *data, size_t samples, uint32_t session_id
                                           opus_data, sizeof(opus_data), &opus_len);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Opus encode error: %s", esp_err_to_name(err));
-            // Skip this frame
         } else if (opus_len > 0) {
             // Send via BLE
             uint8_t flags = 0;
@@ -215,34 +229,38 @@ static void start_recording(void)
     s_asr_success = false;
     s_rec_start_us = esp_timer_get_time();
 
-    // Allocate PCM buffer (enough for 2 seconds worst-case accumulation)
-    size_t max_samples = BOARD_AUDIO_SAMPLE_RATE * 2; // 2 seconds @ 16kHz
+    // Lazily allocate PCM buffer on first use
     if (!s_pcm_buffer) {
+        size_t max_samples = BOARD_AUDIO_SAMPLE_RATE * 2; // 2s @ 16kHz
         s_pcm_buffer = malloc(max_samples * sizeof(int16_t));
+        s_pcm_capacity = s_pcm_buffer ? max_samples : 0;
         if (!s_pcm_buffer) {
-            ESP_LOGE(TAG, "failed to allocate PCM buffer");
-            display_set_state(DISP_STATE_ERROR);
-            return;
+            ESP_LOGW(TAG, "PCM buffer alloc failed, recording without accumulation");
         }
-        s_pcm_capacity = max_samples;
     }
 
-    // DIAG: record without mic — if screen stays RED then PDM init is the issue
-    esp_err_t err = pdm_mic_start(s_session_id);
+    // Lock CPU frequency to prevent PM light sleep during recording
+    if (s_pm_lock) {
+        esp_pm_lock_acquire(s_pm_lock);
+    }
+
+    // Start mic capture (ADC + I2S)
+    esp_err_t err = es8311_mic_start(s_session_id);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PDM start failed: %s — continuing without mic for diag", esp_err_to_name(err));
+        ESP_LOGE(TAG, "mic start failed: %s — continuing without mic", esp_err_to_name(err));
     }
 
     // Reset Opus encoder for new session
     audio_encoder_reset();
 
+    // Set display to RED first, then do non-critical work
     set_state(APP_STATE_RECORDING);
     display_set_state(DISP_STATE_RECORDING);
 
-    // BLE notify (non-critical)
+    // BLE notify (non-critical, may fail silently)
     ble_service_send_state("{\"event\":\"button_down\",\"button\":\"primary\"}");
 
-    ESP_LOGI(TAG, "recording started: session=%u (PDM=%s)", s_session_id,
+    ESP_LOGI(TAG, "recording started: session=%u mic=%s", s_session_id,
              err == ESP_OK ? "ok" : "FAIL");
 }
 
@@ -257,8 +275,15 @@ static void stop_recording(void)
     uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - s_rec_start_us) / 1000);
     uint32_t session = s_session_id;
 
-    // Stop PDM capture
-    pdm_mic_stop();
+    // Stop ES8311 mic capture
+    es8311_mic_stop();
+
+    // Release PM lock so light sleep / freq scaling can resume
+    if (s_pm_lock) {
+        esp_pm_lock_release(s_pm_lock);
+    }
+
+    vTaskDelay(2);  // yield: let read task stop before we touch PCM buffer
 
     // Encode any remaining PCM in the buffer
     if (s_pcm_count > 0 && s_pcm_buffer) {
@@ -280,16 +305,19 @@ static void stop_recording(void)
         }
     }
 
+    vTaskDelay(1);  // yield before BLE sends
+
     // Send end-of-session marker
     send_audio_end(session);
+    vTaskDelay(1);
 
     // Send button up event
     send_button_up("primary", duration_ms, session);
+    vTaskDelay(1);
 
-    // Wait for ASR result from Windows side
-    set_state(APP_STATE_WAITING_ASR);
-    display_set_state(DISP_STATE_THINKING);
-    start_asr_timeout();
+    // Go directly back to IDLE (blue) — no yellow WAITING_ASR state
+    set_state(APP_STATE_IDLE);
+    display_set_state(DISP_STATE_IDLE);
 
     ESP_LOGI(TAG, "recording stopped: session=%u, duration=%u ms", session, duration_ms);
 }
@@ -298,55 +326,45 @@ static void stop_recording(void)
 static void cancel_action(void)
 {
     if (s_state == APP_STATE_RECORDING) {
-        pdm_mic_stop();
+        es8311_mic_stop();
         s_pcm_count = 0;
         ESP_LOGI(TAG, "recording cancelled");
-    } else if (s_state == APP_STATE_WAITING_ASR) {
-        ESP_LOGI(TAG, "ASR waiting cancelled");
-        stop_asr_timeout();
     }
 
-    // Send cancel event (as secondary button click in voicestick protocol)
     send_button_click("secondary", 0, 0);
-
     set_state(APP_STATE_IDLE);
     display_set_state(DISP_STATE_CANCELLED);
 }
 
-// ---- Button callback (toggle mode: press to start, press again to stop) ----
+// ---- Button callback (hold-to-talk: press to start, release to stop) ----
 static void on_button_event(button_event_t event, uint32_t duration_ms)
 {
     (void)duration_ms;
 
+    // Print init error at first press for visibility
+    if (event == BUTTON_EVENT_PRESS_DOWN && s_mic_init_result != ESP_OK) {
+        ESP_LOGE(TAG, "MIC init failed at boot: %s", esp_err_to_name(s_mic_init_result));
+    }
+
     switch (event) {
     case BUTTON_EVENT_PRESS_DOWN:
         ESP_LOGI(TAG, "btn down state=%s", state_name(s_state));
-        // Toggle mode: each press advances to next state
-        switch (s_state) {
-        case APP_STATE_IDLE:
-        case APP_STATE_ADVERTISING:
+        if (s_state == APP_STATE_IDLE || s_state == APP_STATE_ADVERTISING) {
             start_recording();
-            break;
-        case APP_STATE_RECORDING:
-            stop_recording();
-            break;
-        case APP_STATE_WAITING_ASR:
-        case APP_STATE_COMPLETE:
-            stop_asr_timeout();
-            pdm_mic_stop();
-            s_pcm_count = 0;
-            set_state(APP_STATE_IDLE);
-            display_set_state(DISP_STATE_IDLE);
-            break;
-        default:
-            break;
         }
         break;
 
     case BUTTON_EVENT_PRESS_UP:
+        if (s_state == APP_STATE_RECORDING) {
+            stop_recording();
+        }
+        break;
+
     case BUTTON_EVENT_DOUBLE_CLICK:
+        cancel_action();
+        break;
+
     case BUTTON_EVENT_LONG_PRESS:
-        // Not used in toggle mode
         break;
     }
 }
@@ -408,7 +426,11 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed: %s, continuing without BLE", esp_err_to_name(ble_err));
     } else {
         ble_service_set_control_callback(on_ble_control);
+        ble_service_set_connect_callback(display_set_ble_connected);
     }
+
+    // Create PM lock to prevent light sleep during recording
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "recording", &s_pm_lock);
 
     // Create ASR timeout timer
     esp_timer_create_args_t timer_args = {
@@ -421,11 +443,11 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     display_set_state(DISP_STATE_IDLE);
 
-    // Initialize PDM microphone FIRST (before Opus to avoid heap corruption)
-    ESP_LOGI(TAG, "Initializing PDM mic...");
-    esp_err_t pdm_err = pdm_mic_init(on_pcm_data);
-    if (pdm_err != ESP_OK) {
-        ESP_LOGE(TAG, "PDM mic init failed: %s", esp_err_to_name(pdm_err));
+    // Initialize ES8311 mic FIRST (before Opus to avoid heap corruption)
+    ESP_LOGI(TAG, "Initializing ES8311 mic...");
+    s_mic_init_result = es8311_mic_init(on_pcm_data);
+    if (s_mic_init_result != ESP_OK) {
+        ESP_LOGE(TAG, "ES8311 mic init failed: %s", esp_err_to_name(s_mic_init_result));
     }
 
     // Initialize Opus encoder (now uses internal RAM to avoid PSRAM issue)
@@ -438,16 +460,16 @@ void app_main(void)
     if (opus_err != ESP_OK) {
         ESP_LOGW(TAG, "Opus init failed: %s, continuing without encoding", esp_err_to_name(opus_err));
     }
-    // Note: pdm_mic is started/stopped per recording session
+    // Note: es8311_mic is started/stopped per recording session
 
     // Initialize button
     ESP_ERROR_CHECK(button_init(on_button_event));
 
-    ESP_LOGI(TAG, "creating PDM read task...");
-    extern void pdm_mic_read_task(void *arg);
-    BaseType_t task_ok = xTaskCreate(pdm_mic_read_task, "pdm_read", 32768, NULL, 6, NULL);
+    ESP_LOGI(TAG, "creating ES8311 mic read task...");
+    extern void es8311_mic_read_task(void *arg);
+    BaseType_t task_ok = xTaskCreate(es8311_mic_read_task, "es8311_read", 32768, NULL, 6, NULL);
     if (task_ok != pdPASS) {
-        ESP_LOGE(TAG, "failed to create PDM read task");
+        ESP_LOGE(TAG, "failed to create ES8311 read task");
     }
 
     set_state(APP_STATE_ADVERTISING);

@@ -33,6 +33,7 @@ class AsrClient:
         self._running = False
         self._session_id = ""
         self._muxer = OggOpusMuxer()
+        self._start_lock = asyncio.Lock()
         # 会话启动同步机制：_recv_loop 收到响应后设置事件
         self._session_started_ev = asyncio.Event()
         self._session_start_ok = False
@@ -84,57 +85,58 @@ class AsrClient:
 
         火山引擎每个连接只支持一次识别。录音前重新连接并发送配置。
         """
-        try:
-            self._muxer.reset()
-            self._session_id = uuid.uuid4().hex[:16]
+        async with self._start_lock:
+            try:
+                self._muxer.reset()
+                self._session_id = uuid.uuid4().hex[:16]
 
-            # 停止旧的 recv 循环和连接
-            self._running = False
-            if self._task:
-                self._task.cancel()
-                try:
-                    await self._task
-                except asyncio.CancelledError:
-                    pass
-                self._task = None
-            await self._cleanup()
+                # 停止旧的 recv 循环和连接
+                self._running = False
+                if self._task:
+                    self._task.cancel()
+                    try:
+                        await self._task
+                    except asyncio.CancelledError:
+                        pass
+                    self._task = None
+                await self._cleanup()
 
-            # 新建连接并发送配置
-            self._running = True
-            headers = {
-                "X-Api-Key": self._api_key,
-                "X-Api-Request-Id": uuid.uuid4().hex,
-                "X-Api-Sequence": "-1",
-                "X-Api-Resource-Id": "volc.seedasr.sauc.duration",
-            }
-            self._session = aiohttp.ClientSession()
-            self._ws = await asyncio.wait_for(
-                self._session.ws_connect(self._server_url, headers=headers,
-                                         heartbeat=30.0, receive_timeout=120.0),
-                timeout=10.0,
-            )
-            await self._ws.send_bytes(proto.make_start_connection())
+                # 新建连接并发送配置
+                self._running = True
+                headers = {
+                    "X-Api-Key": self._api_key,
+                    "X-Api-Request-Id": uuid.uuid4().hex,
+                    "X-Api-Sequence": "-1",
+                    "X-Api-Resource-Id": "volc.seedasr.sauc.duration",
+                }
+                self._session = aiohttp.ClientSession()
+                self._ws = await asyncio.wait_for(
+                    self._session.ws_connect(self._server_url, headers=headers,
+                                             heartbeat=30.0, receive_timeout=120.0),
+                    timeout=10.0,
+                )
+                await self._ws.send_bytes(proto.make_start_connection())
 
-            # 等待服务器确认（直接接收，不用 recv_loop）
-            if not await self._wait_for_event(proto.EVENT_CONNECTION_STARTED, timeout=10.0):
-                raise ConnectionError("ASR 连接未确认")
+                # 等待服务器确认（直接接收，不用 recv_loop）
+                if not await self._wait_for_event(proto.EVENT_CONNECTION_STARTED, timeout=10.0):
+                    raise ConnectionError("ASR 连接未确认")
 
-            # 启动 recv 循环处理后续结果
-            self._task = asyncio.create_task(self._recv_loop())
-            logger.info("ASR 会话已开始: %s", self._session_id)
-            return True
+                # 启动 recv 循环处理后续结果
+                self._task = asyncio.create_task(self._recv_loop())
+                logger.info("ASR 会话已开始: %s", self._session_id)
+                return True
 
-        except asyncio.TimeoutError:
-            logger.warning("ASR 会话创建超时")
-            await self._cleanup()
-            return False
-        except Exception as e:
-            logger.warning("ASR 会话创建失败: %s", e)
-            await self._cleanup()
-            return False
+            except asyncio.TimeoutError:
+                logger.warning("ASR 会话创建超时")
+                await self._cleanup()
+                return False
+            except Exception as e:
+                logger.warning("ASR 会话创建失败: %s", e)
+                await self._cleanup()
+                return False
 
     async def stop_session(self):
-        """结束 ASR 会话（火山引擎通过在最后一帧音频加 is_last 标记来结束，无需额外消息）"""
+        """结束 ASR 会话 — 保持连接等待服务器返回结果"""
         self._session_id = ""
         self._muxer.reset()
 
@@ -177,21 +179,27 @@ class AsrClient:
         # 不自动重连 — start_session() 负责按需重建连接
 
     def _handle_binary(self, data: bytes):
+        hex_preview = data[:80].hex()
+        logger.info("📨 WS消息 %d字节: %s", len(data), hex_preview)
+
         # 先尝试事件响应格式
         ev = proto.parse_event_response(data)
         if ev:
+            logger.info("  → 事件 id=%d 名称=%s payload=%s",
+                         ev.event_id, ev.event_name, ev.payload_text[:200] if ev.payload_text else "(空)")
             self._handle_event(ev)
             return
 
         # 再尝试通用响应格式
         resp = proto.parse_response(data)
         if resp:
+            logger.info("  → 响应 error=%s final=%s text=%s",
+                         resp.is_error, resp.is_final, resp.text[:200] if resp.text else "(空)")
             self._handle_asr_response(resp)
             return
 
         # 无法解析的消息 — 打印 hex 排错
-        logger.warning("收到无法解析的消息: %d 字节, 完整hex=%s",
-                       len(data), data.hex()[:200])
+        logger.warning("  → ❌ 无法解析: %s", data.hex()[:200])
 
     def _handle_event(self, ev: proto.AsrEventResponse):
         if ev.event_id == proto.EVENT_ASR_INFO:
@@ -226,8 +234,8 @@ class AsrClient:
     def _handle_asr_response(self, resp: proto.AsrResponse):
         if resp.is_error:
             if "Timeout waiting next packet" in resp.text or "session has ended" in resp.text:
-                logger.info("ASR 空闲超时，重启会话")
-                asyncio.create_task(self._restart_session())
+                logger.info("ASR 空闲超时（session 已结束，等待下次录音重新创建）")
+                # 不自启重启 — 由 _process_audio 在下次录音时创建新会话
             elif self.on_error:
                 self.on_error(resp.text)
             return

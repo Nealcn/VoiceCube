@@ -78,6 +78,8 @@ def make_start_connection() -> bytes:
         "request": {
             "model_name": "bigmodel",
             "enable_nonstream": True,
+            "enable_ddc": True,
+            "resource_id": "volc.seedasr.sauc.duration",
             "show_utterances": False,
             "result_type": "full",
             "enable_punc": True,

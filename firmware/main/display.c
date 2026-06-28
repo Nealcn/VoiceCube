@@ -35,6 +35,7 @@ static spi_device_handle_t s_spi = NULL;
 static i2c_master_bus_handle_t s_i2c_bus = NULL;   // LP5562 I2C bus handle (must outlive device)
 static i2c_master_dev_handle_t s_lp5562 = NULL;
 static disp_state_t s_state = DISP_STATE_IDLE;
+static bool s_ble_connected = false;
 static TaskHandle_t s_anim = NULL;
 static uint8_t *s_fb = NULL;  // MSB-first byte pairs, DMA-aligned
 
@@ -172,6 +173,11 @@ static void s_idle(void) {
     // Large centered circle (looks like a record button)
     circle(64,55,25,RGB565(0,180,0),1);
     circle(64,55,15,RGB565(0,100,0),1);
+    // BLE connection indicator: small green dot in top-right
+    if (s_ble_connected) {
+        circle(120, 8, 4, RGB565(0, 255, 0), 1);
+        circle(120, 8, 3, RGB565(0, 200, 0), 1);
+    }
 }
 static void s_rec(int ph) {
     clear(C_RED); mic(64,55,60,C_WHITE);
@@ -286,6 +292,10 @@ esp_err_t display_init(void) {
     xTaskCreate(anim, "disp", 8192, NULL, 5, &s_anim);   // 8K — cosf/sinf need stack
     ESP_LOGI(TAG, "Display ready");
     return ESP_OK;
+}
+
+void display_set_ble_connected(bool connected) {
+    s_ble_connected = connected;
 }
 
 void display_set_state(disp_state_t state) {

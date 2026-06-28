@@ -34,6 +34,11 @@ esp_err_t display_init(void);
 void display_set_state(disp_state_t state);
 
 /**
+ * @brief Show/hide BLE connected indicator (small green dot)
+ */
+void display_set_ble_connected(bool connected);
+
+/**
  * @brief Set brightness (0-100)
  */
 void display_set_brightness(uint8_t percent);

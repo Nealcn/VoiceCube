@@ -19,9 +19,11 @@
 #define ES8311_I2S_DIN_PIN      GPIO_NUM_7   // I2S mic data in
 #define ES8311_I2S_DOUT_PIN     GPIO_NUM_5   // I2S speaker data out
 
-// --- Built-in PDM Microphone (MSM381A3729H9BPC) ---
-#define BOARD_PDM_CLK_PIN       GPIO_NUM_1
-#define BOARD_PDM_DATA_PIN      GPIO_NUM_2
+// ---- Built-in PDM Microphone (MSM381A3729H9BPC) - DEPRECATED: use ES8311 on Atomic Echo Base
+// Previously: CLK=GPIO1, DATA=GPIO2
+// Keep pins commented for reference only
+//#define BOARD_PDM_CLK_PIN       GPIO_NUM_1
+//#define BOARD_PDM_DATA_PIN      GPIO_NUM_2
 
 // --- User Button (press on screen area) ---
 // Active low (pull-up internally)
@@ -40,10 +42,8 @@
 #define BOARD_AUDIO_FRAME_SAMPLES \
     (BOARD_AUDIO_SAMPLE_RATE * BOARD_AUDIO_FRAME_MS / 1000)  // 960 samples
 
-// --- PDM Clock Configuration ---
-// PDM_CLK = sample_rate * PDM_FREQ_DIV
-// For 16 kHz output with 80 divider: 16k * 80 = 1.28 MHz PDM clock
-#define BOARD_PDM_CLK_DIV       80
+// ---- PDM Clock Configuration (deprecated - ES8311 I2S used instead) ---
+//#define BOARD_PDM_CLK_DIV       80
 
 // --- BLE Configuration ---
 #define BOARD_BLE_DEVICE_PREFIX "VS-"        // Must match voicestick prefix

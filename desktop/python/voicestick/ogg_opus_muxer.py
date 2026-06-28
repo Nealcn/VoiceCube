@@ -90,10 +90,19 @@ class OggOpusMuxer:
         page += struct.pack("<I", self._sequence)  # page sequence number
         page += struct.pack("<I", 0)  # CRC (placeholder)
         if packet:
-            page += struct.pack("<B", len(packet))  # number of lacing segments
+            # Ogg格式: page_segments (1B) + lacing_values数组 + 数据段
+            # lacing值 255=续段, 0-254=段结束
+            segs = []
+            rem = len(packet)
+            while rem > 255:
+                segs.append(255)
+                rem -= 255
+            segs.append(rem)
+            page += struct.pack("<B", len(segs))  # page_segments
+            page += struct.pack(f"<{len(segs)}B", *segs)  # lacing_values
             page += packet
         else:
-            page += struct.pack("<B", 0)  # empty page
+            page += struct.pack("<B", 0)  # page_segments=0 (空页)
         # 计算并填入 CRC
         crc = _ogg_crc(page)
         page = page[:22] + struct.pack("<I", crc) + page[26:]

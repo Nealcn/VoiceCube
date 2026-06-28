@@ -4,11 +4,18 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/sdkconfig.bak
 desktop/windows/build*/
+build/
+dist/
 *.o
 *.obj
 *.elf
 *.bin
 *.map
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
 
 # IDE
 .idea/
@@ -21,3 +28,7 @@ temp_*/
 *.log
 *.bat
 *.output
+*.old
+
+# Desktop exe packaging
+desktop/python/*.spec
