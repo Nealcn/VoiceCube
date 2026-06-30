@@ -167,6 +167,7 @@ class FloatingBallWindow(QWidget):
                 self._pulse.start(500)
         else:
             self._pulse.stop()
+            self._main.set_border(None)  # 清除脉冲留下的红边
         # 非空闲状态启动 15s 兜底，空闲状态取消
         busy = ("录音" in s or "识别" in s or "粘贴" in s or
                 "翻译" in s or "润色" in s)
