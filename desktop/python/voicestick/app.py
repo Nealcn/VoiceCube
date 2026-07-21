@@ -53,6 +53,7 @@ class VoiceStickApp:
         # 配置协调器
         self._coordinator.paste_on_final = self._config.paste_on_final
         self._coordinator.press_enter_after_paste = self._config.press_enter_after_paste
+        self._coordinator.output_mode = self._config.output_mode
         self._coordinator.configure_translation(
             enabled=self._config.enable_translation,
             api_key=self._config.llm_api_key,
@@ -192,6 +193,7 @@ class VoiceStickApp:
         if dialog.exec() and dialog.changed:
             self._coordinator.paste_on_final = self._config.paste_on_final
             self._coordinator.press_enter_after_paste = self._config.press_enter_after_paste
+            self._coordinator.output_mode = self._config.output_mode
             self._coordinator.configure_translation(
                 enabled=self._config.enable_translation,
                 api_key=self._config.llm_api_key,

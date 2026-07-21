@@ -6,7 +6,7 @@ from typing import Optional
 from .protocol import StateEvent, AudioFrame, ui_state_payload
 from .ble import BleClient
 from .asr_client import AsrClient
-from .input_injector import paste_text
+from .input_injector import paste_text, type_text_direct
 from .llm_translation_client import LLMTranslationClient
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class Coordinator:
         # 配置
         self.paste_on_final = True
         self.press_enter_after_paste = False
+        self.output_mode = "clipboard"  # "clipboard" | "direct"
         self.asr_server_url = "ws://localhost:8080"
 
         # BLE 心跳保活：每 20 秒发一个空控制包防止空闲断连
@@ -241,7 +242,10 @@ class Coordinator:
         # 自动粘贴
         if self.paste_on_final:
             self._set_status("粘贴中…")
-            ok = await asyncio.to_thread(paste_text, content, self.press_enter_after_paste)
+            if self.output_mode == "direct":
+                ok = await asyncio.to_thread(type_text_direct, content, self.press_enter_after_paste)
+            else:
+                ok = await asyncio.to_thread(paste_text, content, self.press_enter_after_paste)
             if ok:
                 self._set_status("已粘贴")
             else:

@@ -2,7 +2,7 @@
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLineEdit, QTextEdit, QCheckBox, QPushButton,
-    QLabel, QGroupBox, QWidget,
+    QLabel, QGroupBox, QWidget, QComboBox,
 )
 from PyQt5.QtCore import Qt
 from ..config import AppConfig
@@ -131,12 +131,19 @@ class SettingsDialog(QDialog):
         inp_layout = QVBoxLayout(inp_box)
         inp_layout.setSpacing(10)
         inp_layout.setContentsMargins(10, 12, 10, 10)
-        self._paste_check = QCheckBox("识别完成后自动粘贴")
+        self._paste_check = QCheckBox("自动输出文字")
         self._paste_check.setChecked(self._config.paste_on_final)
         inp_layout.addLayout(self._row_check(self._paste_check))
-        self._enter_check = QCheckBox("粘贴后按 Enter")
+        self._enter_check = QCheckBox("末尾自动换行")
         self._enter_check.setChecked(self._config.press_enter_after_paste)
         inp_layout.addLayout(self._row_check(self._enter_check))
+        self._output_mode = QComboBox()
+        self._output_mode.addItem("模拟粘贴", "clipboard")
+        self._output_mode.addItem("模拟打字", "direct")
+        idx = self._output_mode.findData(self._config.output_mode)
+        if idx >= 0:
+            self._output_mode.setCurrentIndex(idx)
+        inp_layout.addLayout(self._row(self._output_mode, "输出方式："))
         self._paired_ids = QLineEdit(", ".join(self._config.paired_device_ids))
         self._paired_ids.setPlaceholderText("例如: E3F6, A1B2")
         inp_layout.addLayout(self._row(self._paired_ids, "已配对设备："))
@@ -213,6 +220,7 @@ class SettingsDialog(QDialog):
         self._config.asr_api_key = self._asr_key.text().strip()
         self._config.paste_on_final = self._paste_check.isChecked()
         self._config.press_enter_after_paste = self._enter_check.isChecked()
+        self._config.output_mode = self._output_mode.currentData() or "clipboard"
         self._config.llm_base_url = self._llm_url.text().strip()
         self._config.llm_api_key = self._llm_key.text().strip()
         self._config.llm_model = self._llm_model.text().strip()

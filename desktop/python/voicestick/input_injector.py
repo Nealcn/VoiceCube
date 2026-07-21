@@ -12,6 +12,7 @@ VK_V = 0x56
 VK_RETURN = 0x0D
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -130,5 +131,62 @@ def paste_text(text: str, press_enter: bool = False) -> bool:
     if old_clip:
         time.sleep(0.1)
         _set_clipboard_text(old_clip)
+
+    return True
+
+
+def type_text_direct(text: str, press_enter: bool = False) -> bool:
+    """直接输入文本到当前光标位置（使用 SendInput Unicode，不操作剪贴板）"""
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.wintypes.WORD),
+            ("wScan", ctypes.wintypes.WORD),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("time", ctypes.wintypes.DWORD),
+            ("dwExtraInfo", ctypes.wintypes.ULONG),
+        ]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [
+            ("type", ctypes.wintypes.DWORD),
+            ("ki", KEYBDINPUT),
+        ]
+
+    def _send_unicode_unit(code: int):
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.ki.wVk = 0
+        inp.ki.wScan = code & 0xFFFF
+        inp.ki.dwFlags = KEYEVENTF_UNICODE
+        inp.ki.time = 0
+        inp.ki.dwExtraInfo = 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        inp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    for ch in text:
+        cp = ord(ch)
+        if cp < 0x10000:
+            _send_unicode_unit(cp)
+        else:
+            # Surrogate pair for non-BMP characters
+            cp -= 0x10000
+            _send_unicode_unit(0xD800 + (cp >> 10))
+            _send_unicode_unit(0xDC00 + (cp & 0x3FF))
+        time.sleep(0.001)  # small delay between characters
+
+    if press_enter:
+        import copy
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.ki.wVk = VK_RETURN
+        inp.ki.wScan = 0
+        inp.ki.dwFlags = 0
+        inp.ki.time = 0
+        inp.ki.dwExtraInfo = 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.02)
+        inp.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     return True

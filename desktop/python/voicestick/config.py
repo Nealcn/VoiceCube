@@ -12,6 +12,7 @@ class AppConfig:
     language: str = "zh-CN"
     paste_on_final: bool = True
     press_enter_after_paste: bool = False
+    output_mode: str = "clipboard"  # "clipboard" | "direct"
     interaction_mode: str = "hold_to_talk"
     overlay_theme: str = "auto"
     subtitle_enabled: bool = True
